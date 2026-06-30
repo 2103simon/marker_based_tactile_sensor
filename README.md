@@ -141,6 +141,13 @@ Default settings:
 python3 generate_pin_pattern.py
 ```
 
+By default this writes:
+
+- `pin_points_inventor.xlsx`: Inventor import points.
+- `pin_points_with_normals.xlsx`: diagnostic points and inward normals.
+- `pin_pattern_preview.html`: interactive 3D preview with the dome shell, pin
+  cylinders, and rim wall.
+
 Useful examples:
 
 ```bash
@@ -156,6 +163,18 @@ python3 generate_pin_pattern.py --pattern fibonacci --point-count 170
 # Increase approximate pin spacing
 python3 generate_pin_pattern.py --target-spacing-mm 5.0
 
+# Add a density gradient: denser near the center, looser near the rim
+python3 generate_pin_pattern.py --center-spacing-mm 3.0 --periphery-spacing-mm 6.0
+
+# Write the interactive preview to another path
+python3 generate_pin_pattern.py --preview-output preview/pins.html
+
+# Skip preview generation
+python3 generate_pin_pattern.py --no-preview
+
+# Add preview helper overlays for debugging directions
+python3 generate_pin_pattern.py --preview-show-helpers
+
 # Stop before the rim
 python3 generate_pin_pattern.py --theta-max-deg 80
 
@@ -170,15 +189,45 @@ Important options:
 
 - `--pattern rings`: latitude-ring style distribution.
 - `--pattern fibonacci`: golden-angle sunflower distribution on the spherical
-  cap.
+  cap. When the center point is included, Fibonacci mode starts with a symmetric
+  six-pin center ring before continuing the sunflower layout.
+- `--preview-output`: path for the interactive HTML preview. The default is
+  `pin_pattern_preview.html`.
+- `--no-preview`: skip the interactive HTML preview.
+- `--preview-show-helpers`: add inward axis lines, direction cones, base point
+  markers, and sphere center to the preview.
 - `--point-count`: fixed point count for Fibonacci mode.
 - `--target-spacing-mm`: approximate spacing between neighboring pins.
+- `--center-spacing-mm`: optional spacing at the dome center. Smaller spacing
+  means higher pin density.
+- `--periphery-spacing-mm`: optional spacing near `--theta-max-deg`, also
+  available as `--rim-spacing-mm` or `--edge-spacing-mm`.
 - `--theta-max-deg`: maximum angle from the bottom pole. `90` reaches the cut
   rim; lower values leave a margin.
 - `--exclude-center`: omit the bottom center point from the generated workbook.
 - `--rotate-x-deg`: rotates output coordinates around the X axis. The default
   is `90`, matching the current Inventor orientation.
 - `--precision`: decimal places in the workbook. The default is `8`.
+
+## Preview
+
+The HTML preview uses the same orientation options as the generated workbooks:
+`--z-origin` and `--rotate-x-deg`. Each pin is drawn as a cylinder whose base
+center is exactly on the inner sphere point. The cylinder axis follows the
+inward normal direction, with diameter from `pin_diameter` and height from
+`pin_height`.
+
+The dome shell is drawn from `dome_diameter` as the inner diameter and
+`wall_thickness` as the radial wall thickness, so the outer surface and cut rim
+are visible before importing anything into Inventor.
+
+The generated HTML loads Plotly from a CDN, so open it with browser internet
+access unless you adapt the file to use a local Plotly bundle.
+
+GitHub README files do not run arbitrary interactive Plotly/HTML content
+inline. Keep the generated HTML file as a local preview artifact, or link to it
+from the README. For a GitHub-native rotatable preview, export an `.stl` model
+and link to that file in the repository.
 
 ## Collision Checks
 
