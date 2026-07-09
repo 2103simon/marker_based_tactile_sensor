@@ -18,7 +18,8 @@ from xml.sax.saxutils import escape
 
 UNIT_NAMES = {"mm", "deg", "ul"}
 GOLDEN_ANGLE_RAD = math.pi * (3.0 - math.sqrt(5.0))
-FIBONACCI_CENTER_RING_COUNT = 6
+DEFAULT_DEBUG_SPIRAL_OUTPUT = Path("pin_pattern_spiral_debug.html")
+CENTER_FILL_FACTOR = 0.86
 
 
 @dataclass(frozen=True)
@@ -68,31 +69,38 @@ def parse_args() -> argparse.Namespace:
             "import; the annotated workbook also includes inward normal vectors."
         )
     )
-    parser.add_argument(
+
+    files = parser.add_argument_group("file outputs")
+    files.add_argument(
         "--params",
         type=Path,
         default=Path("dome-params.xml"),
         help="Inventor XML parameter file containing dome_diameter.",
     )
-    parser.add_argument(
+    files.add_argument(
         "--output",
         type=Path,
         default=Path("pin_points_inventor.xlsx"),
         help="XLSX workbook with x,y,z columns only. Defaults to no header for Inventor import.",
     )
-    parser.add_argument(
+    files.add_argument(
         "--normal-output",
         type=Path,
         default=Path("pin_points_with_normals.xlsx"),
         help="XLSX workbook with metadata and inward normal vectors for inspection or iLogic/API use.",
     )
-    parser.add_argument(
+
+    preview = parser.add_argument_group("preview and debug plots")
+    preview.add_argument(
         "--preview-output",
         type=Path,
         default=Path("pin_pattern_preview.html"),
-        help="Interactive HTML preview output path.",
+        help=(
+            "Interactive HTML preview path. Defaults to pin_pattern_preview.html "
+            "in the current directory."
+        ),
     )
-    preview_group = parser.add_mutually_exclusive_group()
+    preview_group = preview.add_mutually_exclusive_group()
     preview_group.add_argument(
         "--create-preview",
         dest="create_preview",
@@ -106,7 +114,7 @@ def parse_args() -> argparse.Namespace:
         action="store_false",
         help="Skip the interactive HTML preview.",
     )
-    parser.add_argument(
+    preview.add_argument(
         "--preview-show-helpers",
         action="store_true",
         help=(
@@ -115,22 +123,47 @@ def parse_args() -> argparse.Namespace:
             "pin cylinders only."
         ),
     )
-    parser.add_argument(
+    preview.add_argument(
+        "--debug-spiral-output",
+        type=Path,
+        nargs="?",
+        const=DEFAULT_DEBUG_SPIRAL_OUTPUT,
+        default=None,
+        help=(
+            "Create an optional fibonacci construction debug HTML. If no path is "
+            f"provided, writes {DEFAULT_DEBUG_SPIRAL_OUTPUT} in the current directory."
+        ),
+    )
+
+    patterning = parser.add_argument_group("pattern and density")
+    patterning.add_argument(
+        "--pattern",
+        choices=("rings", "fibonacci"),
+        default="rings",
+        help=(
+            "Point distribution algorithm. rings keeps latitude-like rows; "
+            "fibonacci uses the density-derived sunflower/parastichy layout."
+        ),
+    )
+    patterning.add_argument(
         "--target-spacing-mm",
         type=float,
         default=4.0,
-        help="Approximate center-to-center spacing between neighboring pins.",
+        help=(
+            "Uniform target center-to-center pin spacing. This is used everywhere "
+            "unless a center/periphery spacing override is given."
+        ),
     )
-    parser.add_argument(
+    patterning.add_argument(
         "--center-spacing-mm",
         type=float,
         default=None,
         help=(
-            "Optional spacing at the dome center. Defaults to --target-spacing-mm. "
-            "Use with --periphery-spacing-mm to create a density gradient."
+            "Optional center spacing. Overrides --target-spacing-mm at theta-min; "
+            "use with --periphery-spacing-mm for a density gradient."
         ),
     )
-    parser.add_argument(
+    patterning.add_argument(
         "--periphery-spacing-mm",
         "--rim-spacing-mm",
         "--edge-spacing-mm",
@@ -138,44 +171,75 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=None,
         help=(
-            "Optional spacing at theta-max near the rim/periphery. Defaults to "
-            "--target-spacing-mm."
+            "Optional spacing at theta-max near the rim/periphery. Overrides "
+            "--target-spacing-mm at the edge; may be larger or smaller than "
+            "--center-spacing-mm."
         ),
     )
-    parser.add_argument(
-        "--pattern",
-        choices=("rings", "fibonacci"),
-        default="rings",
-        help=(
-            "Point distribution algorithm. rings keeps latitude-like rows; "
-            "fibonacci uses the golden-angle sunflower layout on the spherical cap."
-        ),
-    )
-    parser.add_argument(
+    patterning.add_argument(
         "--point-count",
         type=int,
         default=None,
         help=(
-            "Total number of points for algorithms that support it. Currently "
-            "used by fibonacci; omit to estimate from target spacing."
+            "Fixed total point count for fibonacci mode. When omitted, the point "
+            "count is estimated from the requested spacing or spacing gradient. "
+            "If fixed-count pins collide, the fallback reduces this count."
         ),
     )
-    parser.add_argument(
+
+    collision = parser.add_argument_group("collision safety")
+    collision.add_argument(
         "--collision-clearance-mm",
         type=float,
         default=0.0,
         help=(
             "Extra clearance between pin cylinders. Collision checks use "
-            "pin_diameter + this value as the minimum axis distance."
+            "pin_diameter + this value as the minimum axis distance. For "
+            "spacing-driven generation, unsafe requested spacing is increased; "
+            "for fixed-count fibonacci, the count is reduced."
         ),
     )
-    parser.add_argument(
+
+    refinement = parser.add_argument_group("optional uniformity refinement")
+    refinement.add_argument(
+        "--relax-iterations",
+        type=int,
+        default=0,
+        help=(
+            "Optional post-processing iterations for Fibonacci mode to reduce "
+            "local spacing variance. 0 disables refinement."
+        ),
+    )
+    refinement.add_argument(
+        "--relax-step",
+        type=float,
+        default=0.04,
+        help="Step size per refinement iteration. Smaller values are more conservative.",
+    )
+    refinement.add_argument(
+        "--relax-neighbors",
+        type=int,
+        default=6,
+        help="Nearest neighbors considered for each refinement update.",
+    )
+    refinement.add_argument(
+        "--relax-anchor-weight",
+        type=float,
+        default=0.08,
+        help=(
+            "Pull-back weight toward the initial Fibonacci positions to preserve "
+            "the requested density profile during refinement."
+        ),
+    )
+
+    geometry = parser.add_argument_group("dome region and orientation")
+    geometry.add_argument(
         "--theta-max-deg",
         type=float,
         default=85.0,
         help="Maximum polar angle from the bottom pole. 90 reaches the cut rim.",
     )
-    parser.add_argument(
+    geometry.add_argument(
         "--theta-min-deg",
         type=float,
         default=0.0,
@@ -184,17 +248,17 @@ def parse_args() -> argparse.Namespace:
             "unless --exclude-center is set."
         ),
     )
-    parser.add_argument(
+    geometry.add_argument(
         "--exclude-center",
         action="store_true",
         help="Exclude the bottom pole point when the center pin already exists.",
     )
-    parser.add_argument(
+    geometry.add_argument(
         "--include-center",
         action="store_true",
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
+    geometry.add_argument(
         "--z-origin",
         choices=("sphere_center", "bottom"),
         default="sphere_center",
@@ -203,7 +267,7 @@ def parse_args() -> argparse.Namespace:
             "bottom gives bottom z=0 and rim z=R."
         ),
     )
-    parser.add_argument(
+    geometry.add_argument(
         "--rotate-x-deg",
         type=float,
         default=90.0,
@@ -212,12 +276,14 @@ def parse_args() -> argparse.Namespace:
             "the dome ring planes from XY into XZ."
         ),
     )
-    parser.add_argument(
+
+    formatting = parser.add_argument_group("workbook formatting")
+    formatting.add_argument(
         "--include-header",
         action="store_true",
         help="Add a header row to the x,y,z output workbook.",
     )
-    parser.add_argument(
+    formatting.add_argument(
         "--precision",
         type=int,
         default=8,
@@ -633,11 +699,10 @@ def generate_fibonacci_points(
     points: list[Point] = []
     index = 1
     center_is_in_range = math.isclose(theta_min, 0.0, abs_tol=1e-12)
-    fibonacci_theta_min = theta_min
-    fibonacci_phi_offset = 0.0
-    fibonacci_ring_start = 1
+    added_center = include_center and center_is_in_range
+    sample_shift = 0.0 if added_center else 0.5
 
-    if include_center and center_is_in_range:
+    if added_center:
         points.append(
             make_point(
                 index=index,
@@ -651,69 +716,62 @@ def generate_fibonacci_points(
         )
         index += 1
 
-        center_ring_count = min(FIBONACCI_CENTER_RING_COUNT, total_count - len(points))
-        center_spacing = spacing_gradient.center
-        center_ring_theta = min(theta_max, center_spacing / radius)
-        if center_ring_count > 0 and center_ring_theta > 1e-12:
-            for item in range(center_ring_count):
-                phi = 2 * math.pi * item / center_ring_count
-                points.append(
-                    make_point(
-                        index=index,
-                        ring=1,
-                        theta=center_ring_theta,
-                        phi=phi,
-                        radius=radius,
-                        z_origin=z_origin,
-                        rotate_x_deg=rotate_x_deg,
-                    )
-                )
-                index += 1
-
-            core_point_count = 1 + center_ring_count
-            fibonacci_theta_min = min(
-                theta_max,
-                symmetric_core_boundary_theta(
-                    radius=radius,
-                    spacing=center_spacing,
-                    point_count=core_point_count,
-                ),
-            )
-            fibonacci_phi_offset = 0.5
-            fibonacci_ring_start = 2
-
     remaining_count = total_count - len(points)
     if remaining_count <= 0:
         return points
 
+    center_density_offset = 0.0
+    if added_center:
+        center_density_offset = center_density_offset_for_spacing(
+            radius=radius,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            spacing_gradient=spacing_gradient,
+            remaining_count=remaining_count,
+            sample_shift=sample_shift,
+        )
+
+    arm_count = resolve_spiral_arm_count(remaining_count)
+    spiral_twist = density_gradient_twist(spacing_gradient)
+    density_denominator = remaining_count + center_density_offset
+
     if spacing_gradient.is_uniform():
-        cos_min = math.cos(fibonacci_theta_min)
+        cos_min = math.cos(theta_min)
         cos_max = math.cos(theta_max)
         cos_span = cos_min - cos_max
     else:
-        density_cdf = build_area_density_cdf(fibonacci_theta_min, theta_max, spacing_gradient)
+        density_cdf = build_area_density_cdf(theta_min, theta_max, spacing_gradient)
         density_cumulative_values = [value for _, value in density_cdf]
 
     for item in range(remaining_count):
-        area_fraction = (item + 0.5) / remaining_count
+        area_fraction = (item + sample_shift + center_density_offset) / density_denominator
 
         if spacing_gradient.is_uniform():
             cos_theta = cos_min - cos_span * area_fraction
             theta = math.acos(clamp(cos_theta, cos_max, cos_min))
         else:
             theta = theta_for_area_density_fraction(
-                theta_min=fibonacci_theta_min,
+                theta_min=theta_min,
                 theta_max=theta_max,
                 density_cdf=density_cdf,
                 density_cumulative_values=density_cumulative_values,
                 fraction=area_fraction,
             )
 
-        phi = (item + fibonacci_phi_offset) * GOLDEN_ANGLE_RAD
+        phi = phyllotaxis_phi(
+            item=item,
+            arm_count=arm_count,
+            theta=theta,
+            radius=radius,
+            theta_min=theta_min,
+            theta_max=theta_max,
+            spacing_gradient=spacing_gradient,
+            spiral_twist=spiral_twist,
+        )
         points.append(
             make_point(
                 index=index,
-                ring=fibonacci_ring_start + item,
+                ring=item + 1,
                 theta=theta,
                 phi=phi,
                 radius=radius,
@@ -726,16 +784,266 @@ def generate_fibonacci_points(
     return points
 
 
-def symmetric_core_boundary_theta(radius: float, spacing: float, point_count: int) -> float:
-    if radius <= 0:
-        raise ValueError("radius must be positive")
-    if spacing <= 0:
-        raise ValueError("spacing must be positive")
-    if point_count <= 0:
+def center_density_offset_for_spacing(
+    radius: float,
+    theta_min: float,
+    theta_max: float,
+    spacing_gradient: SpacingGradient,
+    remaining_count: int,
+    sample_shift: float,
+) -> float:
+    if remaining_count <= 0 or radius <= 0:
         return 0.0
 
-    covered_surface_radius = spacing * math.sqrt(point_count * math.sqrt(3.0) / (2 * math.pi))
-    return covered_surface_radius / radius
+    theta_span = theta_max - theta_min
+    if math.isclose(theta_span, 0.0, abs_tol=1e-12):
+        return 0.0
+
+    center_spacing = spacing_gradient.spacing_at_fraction(0.0)
+    # Slightly tighten the first ring to avoid a visually hollow center around
+    # the explicit center pin while still respecting the requested spacing scale.
+    desired_theta = clamp((center_spacing * CENTER_FILL_FACTOR) / radius, 0.0, theta_max)
+    if desired_theta <= 1e-12:
+        return 0.0
+
+    if spacing_gradient.is_uniform():
+        cos_min = math.cos(theta_min)
+        cos_max = math.cos(theta_max)
+        cos_span = cos_min - cos_max
+        if cos_span <= 1e-12:
+            return 0.0
+        target_fraction = (cos_min - math.cos(desired_theta)) / cos_span
+    else:
+        density_cdf = build_area_density_cdf(theta_min, theta_max, spacing_gradient)
+        target_fraction = area_density_fraction_at_theta(
+            theta_min=theta_min,
+            theta_max=theta_max,
+            density_cdf=density_cdf,
+            theta=desired_theta,
+        )
+
+    target_fraction = clamp(target_fraction, 1e-9, 1.0 - 1e-9)
+    offset = (target_fraction * remaining_count - sample_shift) / (1.0 - target_fraction)
+    return max(0.0, offset)
+
+
+def refine_fibonacci_uniformity(
+    points: list[Point],
+    radius: float,
+    theta_min_deg: float,
+    theta_max_deg: float,
+    z_origin: str,
+    rotate_x_deg: float,
+    spacing_gradient: SpacingGradient,
+    include_center: bool,
+    iterations: int,
+    step_size: float,
+    neighbor_count: int,
+    anchor_weight: float,
+) -> list[Point]:
+    if iterations <= 0 or len(points) <= 2:
+        return points
+    if step_size <= 0:
+        raise ValueError("relax-step must be positive")
+    if neighbor_count <= 0:
+        raise ValueError("relax-neighbors must be positive")
+    if anchor_weight < 0:
+        raise ValueError("relax-anchor-weight must be non-negative")
+
+    theta_min = math.radians(theta_min_deg)
+    theta_max = math.radians(theta_max_deg)
+    refined = list(points)
+    anchor_positions = [(point.x, point.y, point.z) for point in points]
+    movable_start = 1 if (include_center and math.isclose(theta_min, 0.0, abs_tol=1e-12)) else 0
+    sphere_center = sphere_center_point(radius, z_origin, rotate_x_deg)
+
+    for _ in range(iterations):
+        updated = list(refined)
+        for index in range(movable_start, len(refined)):
+            point = refined[index]
+            normal = (point.nx, point.ny, point.nz)
+            position = (point.x, point.y, point.z)
+            spacing_i = spacing_gradient.spacing_at_fraction(
+                normalized_theta_fraction(math.radians(point.theta_deg), theta_min, theta_max)
+            )
+
+            neighbor_candidates: list[tuple[float, int]] = []
+            for other_index, other_point in enumerate(refined):
+                if other_index == index:
+                    continue
+                distance = vector_length(
+                    vector_sub(
+                        (point.x, point.y, point.z),
+                        (other_point.x, other_point.y, other_point.z),
+                    )
+                )
+                neighbor_candidates.append((distance, other_index))
+
+            neighbor_candidates.sort(key=lambda item: item[0])
+            selected_neighbors = neighbor_candidates[:neighbor_count]
+            if not selected_neighbors:
+                continue
+
+            force = (0.0, 0.0, 0.0)
+            for distance, other_index in selected_neighbors:
+                if distance <= 1e-12:
+                    continue
+                other = refined[other_index]
+                spacing_j = spacing_gradient.spacing_at_fraction(
+                    normalized_theta_fraction(
+                        math.radians(other.theta_deg),
+                        theta_min,
+                        theta_max,
+                    )
+                )
+                target_distance = max(0.5 * (spacing_i + spacing_j), 1e-9)
+                delta = vector_sub(position, (other.x, other.y, other.z))
+                tangent = vector_sub(delta, vector_scale(normal, vector_dot(delta, normal)))
+                tangent_length = vector_length(tangent)
+                if tangent_length <= 1e-12:
+                    continue
+                tangent_direction = vector_scale(tangent, 1.0 / tangent_length)
+                if distance < target_distance:
+                    mismatch = (target_distance - distance) / target_distance
+                else:
+                    mismatch = -0.08 * (distance - target_distance) / target_distance
+                mismatch = clamp(mismatch, -0.12, 0.85)
+                force = vector_add(force, vector_scale(tangent_direction, mismatch))
+
+            anchor_delta = vector_sub(anchor_positions[index], position)
+            anchor_tangent = vector_sub(
+                anchor_delta,
+                vector_scale(normal, vector_dot(anchor_delta, normal)),
+            )
+            force = vector_add(
+                force,
+                vector_scale(anchor_tangent, anchor_weight / max(radius, 1e-9)),
+            )
+
+            move = vector_scale(force, step_size * radius / len(selected_neighbors))
+            candidate = vector_add(position, move)
+            candidate = project_to_sphere(candidate, sphere_center, radius)
+            theta, phi = theta_phi_from_rotated_point(
+                candidate[0],
+                candidate[1],
+                candidate[2],
+                radius,
+                z_origin,
+                rotate_x_deg,
+            )
+            theta = clamp(theta, theta_min, theta_max)
+            updated[index] = make_point(
+                index=point.index,
+                ring=point.ring,
+                theta=theta,
+                phi=phi,
+                radius=radius,
+                z_origin=z_origin,
+                rotate_x_deg=rotate_x_deg,
+            )
+
+        refined = updated
+
+    return refined
+
+
+def project_to_sphere(
+    point: tuple[float, float, float],
+    center: tuple[float, float, float],
+    radius: float,
+) -> tuple[float, float, float]:
+    relative = vector_sub(point, center)
+    unit = vector_normalize(relative)
+    return vector_add(center, vector_scale(unit, radius))
+
+
+def theta_phi_from_rotated_point(
+    x: float,
+    y: float,
+    z: float,
+    radius: float,
+    z_origin: str,
+    rotate_x_deg: float,
+) -> tuple[float, float]:
+    unrotated_x, unrotated_y, unrotated_z = rotate_around_x(x, y, z, -rotate_x_deg)
+    z_center_origin = unrotated_z if z_origin == "sphere_center" else unrotated_z - radius
+    theta = math.acos(clamp(-z_center_origin / radius, -1.0, 1.0))
+    phi = math.atan2(unrotated_y, unrotated_x)
+    return theta, phi
+
+
+def area_density_fraction_at_theta(
+    theta_min: float,
+    theta_max: float,
+    density_cdf: list[tuple[float, float]],
+    theta: float,
+) -> float:
+    theta_span = theta_max - theta_min
+    if math.isclose(theta_span, 0.0, abs_tol=1e-12):
+        return 0.0
+
+    total = density_cdf[-1][1]
+    if total <= 0:
+        return 0.0
+
+    clamped_fraction = normalized_theta_fraction(theta, theta_min, theta_max)
+    sample_position = clamped_fraction * (len(density_cdf) - 1)
+    lower_index = int(math.floor(sample_position))
+    upper_index = min(lower_index + 1, len(density_cdf) - 1)
+
+    _, lower_cumulative = density_cdf[lower_index]
+    if lower_index == upper_index:
+        cumulative = lower_cumulative
+    else:
+        _, upper_cumulative = density_cdf[upper_index]
+        blend = sample_position - lower_index
+        cumulative = lower_cumulative + (upper_cumulative - lower_cumulative) * blend
+
+    return cumulative / total
+
+
+def resolve_spiral_arm_count(point_count: int) -> int:
+    target = max(3, round(math.sqrt(max(point_count, 1) / 2)))
+    fibonacci_numbers = [3, 5, 8, 13, 21, 34, 55, 89]
+    return min(fibonacci_numbers, key=lambda value: (abs(value - target), value))
+
+
+def density_gradient_twist(spacing_gradient: SpacingGradient) -> float:
+    if spacing_gradient.is_uniform():
+        return 0.0
+    ratio = spacing_gradient.periphery / spacing_gradient.center
+    return math.log(ratio) / (2 * math.pi)
+
+
+def next_fibonacci_number(value: int) -> int:
+    previous, current = 1, 1
+    while current <= value:
+        previous, current = current, previous + current
+    return current
+
+
+def phyllotaxis_phi(
+    item: int,
+    arm_count: int,
+    theta: float,
+    radius: float,
+    theta_min: float,
+    theta_max: float,
+    spacing_gradient: SpacingGradient,
+    spiral_twist: float,
+) -> float:
+    # Use the irrational golden-angle increment to avoid azimuth repeats that
+    # create spoke/ring artifacts and reduce local packing quality.
+    divergence_angle = GOLDEN_ANGLE_RAD
+
+    twist = spiral_twist * meridian_spacing_units_to_theta(
+        radius=radius,
+        theta_min=theta_min,
+        theta_max=theta_max,
+        theta=theta,
+        spacing_gradient=spacing_gradient,
+    )
+    return item * divergence_angle + twist
 
 
 def normalized_theta_fraction(theta: float, theta_min: float, theta_max: float) -> float:
@@ -759,6 +1067,26 @@ def meridian_spacing_units(
 
     spacing_ratio = spacing_gradient.periphery / spacing_gradient.center
     return radius * theta_span * math.log(spacing_ratio) / spacing_delta
+
+
+def meridian_spacing_units_to_theta(
+    radius: float,
+    theta_min: float,
+    theta_max: float,
+    theta: float,
+    spacing_gradient: SpacingGradient,
+) -> float:
+    theta_span = theta_max - theta_min
+    if math.isclose(theta_span, 0.0, abs_tol=1e-12):
+        return 0.0
+
+    theta_fraction = normalized_theta_fraction(theta, theta_min, theta_max)
+    spacing_delta = spacing_gradient.periphery - spacing_gradient.center
+    if math.isclose(spacing_delta, 0.0, abs_tol=1e-12):
+        return radius * theta_span * theta_fraction / spacing_gradient.center
+
+    spacing_at_theta = spacing_gradient.spacing_at_fraction(theta_fraction)
+    return radius * theta_span * math.log(spacing_at_theta / spacing_gradient.center) / spacing_delta
 
 
 def theta_for_meridian_fraction(
@@ -1206,6 +1534,216 @@ def build_plotly_html(traces: list[dict[str, object]], title: str) -> str:
 </body>
 </html>
 """
+
+
+def write_spiral_debug_html(
+    path: Path,
+    points: list[Point],
+    inner_radius: float,
+    theta_min_deg: float,
+    theta_max_deg: float,
+    z_origin: str,
+    rotate_x_deg: float,
+    spacing_gradient: SpacingGradient,
+    include_center: bool,
+    precision: int,
+) -> None:
+    if path.suffix.lower() not in {".html", ".htm"}:
+        raise ValueError(f"Debug output path must end with .html or .htm: {path}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    theta_min = math.radians(theta_min_deg)
+    theta_max = math.radians(theta_max_deg)
+    remaining_count = len(points) - (1 if include_center and math.isclose(theta_min, 0.0) else 0)
+    arm_count = resolve_spiral_arm_count(max(remaining_count, 1))
+    paired_arm_count = next_fibonacci_number(arm_count)
+    spiral_twist = density_gradient_twist(spacing_gradient)
+    plot_points = points[1:] if include_center and math.isclose(theta_min, 0.0) else points
+    sphere_center = sphere_center_point(inner_radius, z_origin, rotate_x_deg)
+
+    first_family_handedness = spiral_family_handedness(plot_points, arm_count)
+    second_family_handedness = spiral_family_handedness(plot_points, paired_arm_count)
+
+    traces: list[dict[str, object]] = [
+        build_spherical_cap_mesh_trace(
+            name="Inner dome surface",
+            radius=inner_radius,
+            inner_radius=inner_radius,
+            theta_max=theta_max,
+            z_origin=z_origin,
+            rotate_x_deg=rotate_x_deg,
+            color="#cbd5e1",
+            opacity=0.16,
+        ),
+        build_parastichy_curve_trace(
+            points=plot_points,
+            step=arm_count,
+            sphere_center=sphere_center,
+            sphere_radius=inner_radius,
+            name=f"{arm_count}-step spiral family ({first_family_handedness})",
+            color="#2563eb",
+        ),
+        build_parastichy_curve_trace(
+            points=plot_points,
+            step=paired_arm_count,
+            sphere_center=sphere_center,
+            sphere_radius=inner_radius,
+            name=f"{paired_arm_count}-step spiral family ({second_family_handedness})",
+            color="#059669",
+        ),
+        build_spiral_debug_point_trace(points),
+    ]
+
+    title = (
+        "Fibonacci Spiral Debug "
+        f"({arm_count}/{paired_arm_count} paired spiral families, "
+        f"density-derived twist {format_number(spiral_twist, precision)})"
+    )
+    path.write_text(build_plotly_html(traces, title), encoding="utf-8")
+
+
+def build_parastichy_curve_trace(
+    points: list[Point],
+    step: int,
+    sphere_center: tuple[float, float, float],
+    sphere_radius: float,
+    name: str,
+    color: str,
+) -> dict[str, object]:
+    x: list[float | None] = []
+    y: list[float | None] = []
+    z: list[float | None] = []
+
+    if step <= 0:
+        raise ValueError("spiral step must be positive")
+
+    for start in range(min(step, len(points))):
+        strand_indices = list(range(start, len(points), step))
+        if not strand_indices:
+            continue
+
+        previous_point = points[strand_indices[0]]
+        x.append(previous_point.x)
+        y.append(previous_point.y)
+        z.append(previous_point.z)
+
+        for item in strand_indices[1:]:
+            point = points[item]
+            for sample_x, sample_y, sample_z in interpolate_surface_arc(
+                start=(previous_point.x, previous_point.y, previous_point.z),
+                end=(point.x, point.y, point.z),
+                center=sphere_center,
+                radius=sphere_radius,
+                samples=8,
+            )[1:]:
+                x.append(sample_x)
+                y.append(sample_y)
+                z.append(sample_z)
+            previous_point = point
+
+        x.append(None)
+        y.append(None)
+        z.append(None)
+
+    return {
+        "type": "scatter3d",
+        "mode": "lines",
+        "name": name,
+        "x": x,
+        "y": y,
+        "z": z,
+        "line": {"color": color, "width": 4},
+        "hoverinfo": "skip",
+    }
+
+
+def build_spiral_debug_point_trace(points: list[Point]) -> dict[str, object]:
+    return {
+        "type": "scatter3d",
+        "mode": "markers",
+        "name": "Generated pin locations",
+        "x": [point.x for point in points],
+        "y": [point.y for point in points],
+        "z": [point.z for point in points],
+        "marker": {
+            "size": 5,
+            "color": "#f97316",
+            "line": {"width": 1, "color": "#111827"},
+        },
+        "text": [
+            (
+                f"Point {point.index}<br>"
+                f"layer={point.ring}<br>"
+                f"theta={format_number(point.theta_deg, 4)} deg<br>"
+                f"phi={format_number(point.phi_deg, 4)} deg"
+            )
+            for point in points
+        ],
+        "hoverinfo": "text",
+    }
+
+
+def spiral_family_handedness(points: list[Point], step: int) -> str:
+    if step <= 0 or len(points) <= step:
+        return "undetermined"
+
+    total_delta = 0.0
+    pair_count = 0
+    for start in range(step):
+        for item in range(start + step, len(points), step):
+            previous = points[item - step]
+            current = points[item]
+            previous_phi = math.radians(previous.phi_deg)
+            current_phi = math.radians(current.phi_deg)
+            delta = math.atan2(
+                math.sin(current_phi - previous_phi),
+                math.cos(current_phi - previous_phi),
+            )
+            total_delta += delta
+            pair_count += 1
+
+    if pair_count == 0:
+        return "undetermined"
+
+    return "counterclockwise" if (total_delta / pair_count) >= 0 else "clockwise"
+
+
+def interpolate_surface_arc(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    center: tuple[float, float, float],
+    radius: float,
+    samples: int,
+) -> list[tuple[float, float, float]]:
+    if samples < 1:
+        return [start, end]
+
+    start_vector = vector_normalize(vector_sub(start, center))
+    end_vector = vector_normalize(vector_sub(end, center))
+    dot = clamp(vector_dot(start_vector, end_vector), -1.0, 1.0)
+    omega = math.acos(dot)
+    sin_omega = math.sin(omega)
+
+    arc_points: list[tuple[float, float, float]] = []
+    for sample_index in range(samples + 1):
+        fraction = sample_index / samples
+        if sin_omega <= 1e-12:
+            blended = vector_add(
+                vector_scale(start_vector, 1.0 - fraction),
+                vector_scale(end_vector, fraction),
+            )
+            unit = vector_normalize(blended)
+        else:
+            start_weight = math.sin((1.0 - fraction) * omega) / sin_omega
+            end_weight = math.sin(fraction * omega) / sin_omega
+            unit = vector_add(
+                vector_scale(start_vector, start_weight),
+                vector_scale(end_vector, end_weight),
+            )
+
+        arc_points.append(vector_add(center, vector_scale(unit, radius)))
+
+    return arc_points
 
 
 def build_spherical_cap_mesh_trace(
@@ -1731,6 +2269,15 @@ def format_number(value: float, precision: int) -> str:
 
 def main() -> None:
     args = parse_args()
+    if args.relax_iterations < 0:
+        raise SystemExit("--relax-iterations must be non-negative")
+    if args.relax_step <= 0:
+        raise SystemExit("--relax-step must be positive")
+    if args.relax_neighbors <= 0:
+        raise SystemExit("--relax-neighbors must be positive")
+    if args.relax_anchor_weight < 0:
+        raise SystemExit("--relax-anchor-weight must be non-negative")
+
     params = read_inventor_params(args.params)
 
     try:
@@ -1767,6 +2314,37 @@ def main() -> None:
         collision_clearance=args.collision_clearance_mm,
     )
 
+    if args.relax_iterations > 0 and args.pattern == "fibonacci":
+        original_points = points
+        points = refine_fibonacci_uniformity(
+            points=points,
+            radius=radius,
+            theta_min_deg=args.theta_min_deg,
+            theta_max_deg=args.theta_max_deg,
+            z_origin=args.z_origin,
+            rotate_x_deg=args.rotate_x_deg,
+            spacing_gradient=effective_gradient,
+            include_center=not args.exclude_center,
+            iterations=args.relax_iterations,
+            step_size=args.relax_step,
+            neighbor_count=args.relax_neighbors,
+            anchor_weight=args.relax_anchor_weight,
+        )
+        post_collision = find_first_pin_collision(
+            points=points,
+            pin_height=pin_height,
+            minimum_axis_distance=pin_diameter + args.collision_clearance_mm,
+        )
+        if post_collision is not None:
+            first_index, second_index, distance = post_collision
+            print(
+                "Refinement introduced a pin collision "
+                f"(points {first_index} and {second_index}, axis distance "
+                f"{format_number(distance, args.precision)} mm); "
+                "keeping the pre-refinement layout."
+            )
+            points = original_points
+
     write_inventor_xlsx(args.output, points, args.precision, args.include_header)
     write_normal_xlsx(args.normal_output, points, args.precision)
     if args.create_preview:
@@ -1783,6 +2361,22 @@ def main() -> None:
             show_helpers=args.preview_show_helpers,
             precision=args.precision,
         )
+    if args.debug_spiral_output is not None:
+        if args.pattern != "fibonacci":
+            print("Spiral debug HTML is only available for fibonacci mode; skipping debug plot.")
+        else:
+            write_spiral_debug_html(
+                path=args.debug_spiral_output,
+                points=points,
+                inner_radius=radius,
+                theta_min_deg=args.theta_min_deg,
+                theta_max_deg=args.theta_max_deg,
+                z_origin=args.z_origin,
+                rotate_x_deg=args.rotate_x_deg,
+                spacing_gradient=effective_gradient,
+                include_center=not args.exclude_center,
+                precision=args.precision,
+            )
 
     print(f"Read dome_diameter={format_number(dome_diameter, args.precision)} mm")
     print(f"Read wall_thickness={format_number(wall_thickness, args.precision)} mm")
@@ -1790,6 +2384,13 @@ def main() -> None:
     print(f"Read pin_height={format_number(pin_height, args.precision)} mm")
     print(f"Generated {len(points)} point(s) on radius {format_number(radius, args.precision)} mm")
     print(f"Pattern: {args.pattern}")
+    if args.relax_iterations > 0 and args.pattern == "fibonacci":
+        print(
+            "Refinement: "
+            f"iterations={args.relax_iterations}, step={format_number(args.relax_step, 4)}, "
+            f"neighbors={args.relax_neighbors}, "
+            f"anchor_weight={format_number(args.relax_anchor_weight, 4)}"
+        )
     if not requested_gradient.is_uniform():
         print(f"Requested spacing gradient: {format_spacing_gradient(requested_gradient, args.precision)}")
     if not spacing_gradients_equal(effective_gradient, requested_gradient):
@@ -1804,6 +2405,8 @@ def main() -> None:
     print(f"Annotated normals XLSX: {args.normal_output}")
     if args.create_preview:
         print(f"Interactive preview HTML: {args.preview_output}")
+    if args.debug_spiral_output is not None and args.pattern == "fibonacci":
+        print(f"Spiral debug HTML: {args.debug_spiral_output}")
 
 
 if __name__ == "__main__":

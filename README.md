@@ -160,6 +160,12 @@ python3 generate_pin_pattern.py --pattern fibonacci
 # Use Fibonacci with a fixed number of points
 python3 generate_pin_pattern.py --pattern fibonacci --point-count 170
 
+# Show the paired spiral construction curves used by Fibonacci mode
+python3 generate_pin_pattern.py --pattern fibonacci --debug-spiral-output
+
+# Or write the debug plot to a custom path
+python3 generate_pin_pattern.py --pattern fibonacci --debug-spiral-output preview/spiral_debug.html
+
 # Increase approximate pin spacing
 python3 generate_pin_pattern.py --target-spacing-mm 5.0
 
@@ -189,19 +195,27 @@ Important options:
 
 - `--pattern rings`: latitude-ring style distribution.
 - `--pattern fibonacci`: golden-angle sunflower distribution on the spherical
-  cap. When the center point is included, Fibonacci mode starts with a symmetric
-  six-pin center ring before continuing the sunflower layout.
+  cap using paired clockwise/counterclockwise spiral families. Density gradients
+  change the local radial spacing and curve shape. The spiral-family steps and
+  curve strength are calculated from the requested density.
+- `--debug-spiral-output`: optional HTML plot showing the spiral construction
+  curves used to compute Fibonacci pin locations. If no path is provided, it
+  writes `pin_pattern_spiral_debug.html`.
 - `--preview-output`: path for the interactive HTML preview. The default is
   `pin_pattern_preview.html`.
 - `--no-preview`: skip the interactive HTML preview.
 - `--preview-show-helpers`: add inward axis lines, direction cones, base point
   markers, and sphere center to the preview.
 - `--point-count`: fixed point count for Fibonacci mode.
-- `--target-spacing-mm`: approximate spacing between neighboring pins.
-- `--center-spacing-mm`: optional spacing at the dome center. Smaller spacing
-  means higher pin density.
+- `--target-spacing-mm`: uniform approximate spacing between neighboring pins.
+  This is the default spacing everywhere unless one of the gradient endpoint
+  options below overrides it.
+- `--center-spacing-mm`: optional spacing at the dome center. It overrides
+  `--target-spacing-mm` at the center. Smaller spacing means higher pin density.
 - `--periphery-spacing-mm`: optional spacing near `--theta-max-deg`, also
-  available as `--rim-spacing-mm` or `--edge-spacing-mm`.
+  available as `--rim-spacing-mm` or `--edge-spacing-mm`. It overrides
+  `--target-spacing-mm` at the edge. It can be larger or smaller than the center
+  spacing.
 - `--theta-max-deg`: maximum angle from the bottom pole. `90` reaches the cut
   rim; lower values leave a margin.
 - `--exclude-center`: omit the bottom center point from the generated workbook.
@@ -228,6 +242,12 @@ GitHub README files do not run arbitrary interactive Plotly/HTML content
 inline. Keep the generated HTML file as a local preview artifact, or link to it
 from the README. For a GitHub-native rotatable preview, export an `.stl` model
 and link to that file in the repository.
+
+## Fibonacci Debug Plot
+
+For Fibonacci mode, `--debug-spiral-output` writes a second HTML file that shows
+the paired spiral families used to place the pins. Use this when checking how a
+uniform spacing or density gradient turns into the final sunflower layout.
 
 ## Collision Checks
 
