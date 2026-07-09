@@ -148,6 +148,71 @@ By default this writes:
 - `pin_pattern_preview.html`: interactive 3D preview with the dome shell, pin
   cylinders, and rim wall.
 
+## How Pin Locations Are Derived
+
+The script places pin base points on a spherical cap with radius:
+
+```text
+R = dome_diameter / 2
+```
+
+using polar angle `theta` (from bottom pole) and azimuth `phi`.
+
+Unrotated coordinates are:
+
+```text
+x = R * sin(theta) * cos(phi)
+y = R * sin(theta) * sin(phi)
+z_center_origin = -R * cos(theta)
+```
+
+Then:
+
+- `--z-origin bottom` shifts unrotated `z` by `+R`.
+- `--rotate-x-deg` rotates both points and normals around X.
+
+Inward normal vectors are radial vectors toward sphere center:
+
+```text
+n = (-x/R, -y/R, -z_center_origin/R)
+```
+
+Pattern logic:
+
+- `rings` pattern:
+  - Computes ring `theta` values between `theta-min` and `theta-max`.
+  - Computes each ring count from circumference divided by local spacing.
+  - With spacing gradients, ring positions are distributed by integrated
+    meridian spacing units, so denser zones receive more rings.
+- `fibonacci` pattern:
+  - Uses the irrational golden-angle increment to avoid repeated spokes and
+    ring artifacts.
+  - Uses area-density integration for spacing gradients (`sin(theta)/spacing^2`)
+    so center and periphery spacing targets map to a smooth cap density.
+  - Adds an optional density twist term so parastichy families follow the
+    requested gradient.
+
+Center handling:
+
+- If center is included, an explicit pole point is inserted first.
+- Fibonacci applies a small center-fill adjustment so the first ring around the
+  center pin is not visually hollow.
+
+Collision safety and fallback:
+
+- Each pin is modeled as an inward axis segment of length `pin_height`.
+- Minimum allowed axis-to-axis distance is `pin_diameter + collision_clearance`.
+- If collisions are detected, fallback is automatic:
+  - spacing-driven runs increase spacing by 5% each attempt.
+  - fixed-count Fibonacci runs reduce point count by 5% each attempt.
+
+Optional Fibonacci relaxation (`--relax-*`):
+
+- Performs tangent-plane neighbor repulsion with weak long-range attraction.
+- Pulls points slightly toward original positions to preserve density profile.
+- Projects each update back to the sphere and clamps to `theta` limits.
+- Reverts to pre-relaxation points if relaxation introduces a collision.
+
 Useful examples:
 
 ```bash
@@ -165,6 +230,11 @@ python3 generate_pin_pattern.py --pattern fibonacci --debug-spiral-output
 
 # Or write the debug plot to a custom path
 python3 generate_pin_pattern.py --pattern fibonacci --debug-spiral-output preview/spiral_debug.html
+
+# Relax fibonacci points and include displacement vectors in debug HTML
+python3 generate_pin_pattern.py --pattern fibonacci --relax-iterations 60 \
+  --debug-spiral-output preview/spiral_debug.html \
+  --debug-show-displacement-vectors
 
 # Increase approximate pin spacing
 python3 generate_pin_pattern.py --target-spacing-mm 5.0
@@ -189,6 +259,10 @@ python3 generate_pin_pattern.py --exclude-center
 
 # Add extra clearance between pin cylinders
 python3 generate_pin_pattern.py --collision-clearance-mm 0.2
+
+# Optional fibonacci uniformity refinement
+python3 generate_pin_pattern.py --pattern fibonacci --relax-iterations 60 \
+  --relax-step 0.04 --relax-neighbors 6 --relax-anchor-weight 0.08
 ```
 
 Important options:
@@ -201,6 +275,9 @@ Important options:
 - `--debug-spiral-output`: optional HTML plot showing the spiral construction
   curves used to compute Fibonacci pin locations. If no path is provided, it
   writes `pin_pattern_spiral_debug.html`.
+- `--debug-show-displacement-vectors`: when debug output is enabled and
+  relaxation is used, overlays vectors from original construction points to
+  relaxed points.
 - `--preview-output`: path for the interactive HTML preview. The default is
   `pin_pattern_preview.html`.
 - `--no-preview`: skip the interactive HTML preview.
@@ -219,6 +296,11 @@ Important options:
 - `--theta-max-deg`: maximum angle from the bottom pole. `90` reaches the cut
   rim; lower values leave a margin.
 - `--exclude-center`: omit the bottom center point from the generated workbook.
+- `--collision-clearance-mm`: extra clearance added during collision checks.
+- `--relax-iterations`: optional Fibonacci post-processing iterations.
+- `--relax-step`: movement step size per relaxation iteration.
+- `--relax-neighbors`: nearest-neighbor count used by each relaxation update.
+- `--relax-anchor-weight`: pull-back strength toward original Fibonacci points.
 - `--rotate-x-deg`: rotates output coordinates around the X axis. The default
   is `90`, matching the current Inventor orientation.
 - `--precision`: decimal places in the workbook. The default is `8`.
@@ -248,6 +330,24 @@ and link to that file in the repository.
 For Fibonacci mode, `--debug-spiral-output` writes a second HTML file that shows
 the paired spiral families used to place the pins. Use this when checking how a
 uniform spacing or density gradient turns into the final sunflower layout.
+
+When relaxation is enabled, add `--debug-show-displacement-vectors` to overlay
+line segments from original construction locations to relaxed output points.
+
+## VS Code Task Coverage
+
+The `Generate pin pattern XLSX` task in `.vscode/tasks.json` prompts for most
+common options, including pattern, spacing/gradient, optional point count,
+preview/debug HTML path, collision clearance, region/orientation settings, and
+header/precision options.
+
+Current CLI-only flags (not prompted by the task):
+
+- `--debug-show-displacement-vectors`
+- `--relax-iterations`
+- `--relax-step`
+- `--relax-neighbors`
+- `--relax-anchor-weight`
 
 ## Collision Checks
 

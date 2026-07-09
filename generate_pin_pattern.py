@@ -134,6 +134,14 @@ def parse_args() -> argparse.Namespace:
             f"provided, writes {DEFAULT_DEBUG_SPIRAL_OUTPUT} in the current directory."
         ),
     )
+    preview.add_argument(
+        "--debug-show-displacement-vectors",
+        action="store_true",
+        help=(
+            "When plotting relaxed Fibonacci output, overlay vectors from the "
+            "original construction locations to the relaxed pin positions."
+        ),
+    )
 
     patterning = parser.add_argument_group("pattern and density")
     patterning.add_argument(
@@ -1539,6 +1547,7 @@ def build_plotly_html(traces: list[dict[str, object]], title: str) -> str:
 def write_spiral_debug_html(
     path: Path,
     points: list[Point],
+    curve_points: list[Point] | None,
     inner_radius: float,
     theta_min_deg: float,
     theta_max_deg: float,
@@ -1546,6 +1555,7 @@ def write_spiral_debug_html(
     rotate_x_deg: float,
     spacing_gradient: SpacingGradient,
     include_center: bool,
+    show_displacement_vectors: bool,
     precision: int,
 ) -> None:
     if path.suffix.lower() not in {".html", ".htm"}:
@@ -1554,15 +1564,20 @@ def write_spiral_debug_html(
     path.parent.mkdir(parents=True, exist_ok=True)
     theta_min = math.radians(theta_min_deg)
     theta_max = math.radians(theta_max_deg)
-    remaining_count = len(points) - (1 if include_center and math.isclose(theta_min, 0.0) else 0)
+    curve_points = points if curve_points is None else curve_points
+    curves_include_center = include_center and math.isclose(theta_min, 0.0)
+    center_curve_point = curve_points[0] if (curves_include_center and curve_points) else None
+    curve_family_points = curve_points[1:] if center_curve_point is not None else curve_points
+
+    remaining_count = len(curve_family_points)
     arm_count = resolve_spiral_arm_count(max(remaining_count, 1))
     paired_arm_count = next_fibonacci_number(arm_count)
     spiral_twist = density_gradient_twist(spacing_gradient)
-    plot_points = points[1:] if include_center and math.isclose(theta_min, 0.0) else points
     sphere_center = sphere_center_point(inner_radius, z_origin, rotate_x_deg)
 
-    first_family_handedness = spiral_family_handedness(plot_points, arm_count)
-    second_family_handedness = spiral_family_handedness(plot_points, paired_arm_count)
+    first_family_handedness = spiral_family_handedness(curve_family_points, arm_count)
+    second_family_handedness = spiral_family_handedness(curve_family_points, paired_arm_count)
+    curves_are_reference = curve_points is not points
 
     traces: list[dict[str, object]] = [
         build_spherical_cap_mesh_trace(
@@ -1576,28 +1591,54 @@ def write_spiral_debug_html(
             opacity=0.16,
         ),
         build_parastichy_curve_trace(
-            points=plot_points,
+            points=curve_family_points,
             step=arm_count,
             sphere_center=sphere_center,
             sphere_radius=inner_radius,
-            name=f"{arm_count}-step spiral family ({first_family_handedness})",
+            center_point=center_curve_point,
+            name=f"{arm_count}-step original spiral family ({first_family_handedness})",
             color="#2563eb",
         ),
         build_parastichy_curve_trace(
-            points=plot_points,
+            points=curve_family_points,
             step=paired_arm_count,
             sphere_center=sphere_center,
             sphere_radius=inner_radius,
-            name=f"{paired_arm_count}-step spiral family ({second_family_handedness})",
+            center_point=center_curve_point,
+            name=f"{paired_arm_count}-step original spiral family ({second_family_handedness})",
             color="#059669",
         ),
-        build_spiral_debug_point_trace(points),
     ]
+
+    if curves_are_reference:
+        traces.append(
+            build_spiral_debug_point_trace(
+                curve_points,
+                name="Original pin locations",
+                color="#64748b",
+                size=3,
+                opacity=0.46,
+            )
+        )
+        if show_displacement_vectors:
+            traces.append(build_displacement_vector_trace(curve_points, points))
+
+    traces.append(
+        build_spiral_debug_point_trace(
+            points,
+            name=("Relaxed pin locations" if curves_are_reference else "Generated pin locations"),
+            color="#f97316",
+            size=5,
+            opacity=1.0,
+        )
+    )
 
     title = (
         "Fibonacci Spiral Debug "
-        f"({arm_count}/{paired_arm_count} paired spiral families, "
-        f"density-derived twist {format_number(spiral_twist, precision)})"
+        f"({arm_count}/{paired_arm_count} paired original spiral families, "
+        f"density-derived twist {format_number(spiral_twist, precision)}"
+        + (", relaxed pins overlay" if curves_are_reference else "")
+        + ")"
     )
     path.write_text(build_plotly_html(traces, title), encoding="utf-8")
 
@@ -1607,6 +1648,7 @@ def build_parastichy_curve_trace(
     step: int,
     sphere_center: tuple[float, float, float],
     sphere_radius: float,
+    center_point: Point | None,
     name: str,
     color: str,
 ) -> dict[str, object]:
@@ -1622,24 +1664,37 @@ def build_parastichy_curve_trace(
         if not strand_indices:
             continue
 
-        previous_point = points[strand_indices[0]]
-        x.append(previous_point.x)
-        y.append(previous_point.y)
-        z.append(previous_point.z)
+        if center_point is not None:
+            previous_xyz = (center_point.x, center_point.y, center_point.z)
+            x.append(previous_xyz[0])
+            y.append(previous_xyz[1])
+            z.append(previous_xyz[2])
+        else:
+            first_point = points[strand_indices[0]]
+            previous_xyz = (first_point.x, first_point.y, first_point.z)
+            x.append(previous_xyz[0])
+            y.append(previous_xyz[1])
+            z.append(previous_xyz[2])
+            strand_indices = strand_indices[1:]
 
-        for item in strand_indices[1:]:
+        for item in strand_indices:
             point = points[item]
+            arc_angle = great_circle_angle(
+                start=previous_xyz,
+                end=(point.x, point.y, point.z),
+                center=sphere_center,
+            )
             for sample_x, sample_y, sample_z in interpolate_surface_arc(
-                start=(previous_point.x, previous_point.y, previous_point.z),
+                start=previous_xyz,
                 end=(point.x, point.y, point.z),
                 center=sphere_center,
                 radius=sphere_radius,
-                samples=8,
+                samples=arc_samples_for_angle(arc_angle),
             )[1:]:
                 x.append(sample_x)
                 y.append(sample_y)
                 z.append(sample_z)
-            previous_point = point
+            previous_xyz = (point.x, point.y, point.z)
 
         x.append(None)
         y.append(None)
@@ -1657,18 +1712,51 @@ def build_parastichy_curve_trace(
     }
 
 
-def build_spiral_debug_point_trace(points: list[Point]) -> dict[str, object]:
+def build_displacement_vector_trace(
+    original_points: list[Point],
+    moved_points: list[Point],
+) -> dict[str, object]:
+    x: list[float | None] = []
+    y: list[float | None] = []
+    z: list[float | None] = []
+
+    for original, moved in zip(original_points, moved_points):
+        x.extend([original.x, moved.x, None])
+        y.extend([original.y, moved.y, None])
+        z.extend([original.z, moved.z, None])
+
+    return {
+        "type": "scatter3d",
+        "mode": "lines",
+        "name": "Relax displacement vectors",
+        "x": x,
+        "y": y,
+        "z": z,
+        "line": {"color": "#ef4444", "width": 2},
+        "opacity": 0.7,
+        "hoverinfo": "skip",
+    }
+
+
+def build_spiral_debug_point_trace(
+    points: list[Point],
+    name: str,
+    color: str,
+    size: int,
+    opacity: float,
+) -> dict[str, object]:
     return {
         "type": "scatter3d",
         "mode": "markers",
-        "name": "Generated pin locations",
+        "name": name,
         "x": [point.x for point in points],
         "y": [point.y for point in points],
         "z": [point.z for point in points],
         "marker": {
-            "size": 5,
-            "color": "#f97316",
+            "size": size,
+            "color": color,
             "line": {"width": 1, "color": "#111827"},
+            "opacity": opacity,
         },
         "text": [
             (
@@ -1744,6 +1832,22 @@ def interpolate_surface_arc(
         arc_points.append(vector_add(center, vector_scale(unit, radius)))
 
     return arc_points
+
+
+def great_circle_angle(
+    start: tuple[float, float, float],
+    end: tuple[float, float, float],
+    center: tuple[float, float, float],
+) -> float:
+    start_vector = vector_normalize(vector_sub(start, center))
+    end_vector = vector_normalize(vector_sub(end, center))
+    return math.acos(clamp(vector_dot(start_vector, end_vector), -1.0, 1.0))
+
+
+def arc_samples_for_angle(angle_rad: float) -> int:
+    # Keep arc segments visually smooth in debug without changing geometry.
+    target_step = math.radians(2.0)
+    return max(10, min(72, math.ceil(max(angle_rad, 1e-9) / target_step)))
 
 
 def build_spherical_cap_mesh_trace(
@@ -2313,9 +2417,11 @@ def main() -> None:
         pin_height=pin_height,
         collision_clearance=args.collision_clearance_mm,
     )
+    debug_curve_points = points
 
     if args.relax_iterations > 0 and args.pattern == "fibonacci":
         original_points = points
+        debug_curve_points = original_points
         points = refine_fibonacci_uniformity(
             points=points,
             radius=radius,
@@ -2368,6 +2474,7 @@ def main() -> None:
             write_spiral_debug_html(
                 path=args.debug_spiral_output,
                 points=points,
+                curve_points=debug_curve_points,
                 inner_radius=radius,
                 theta_min_deg=args.theta_min_deg,
                 theta_max_deg=args.theta_max_deg,
@@ -2375,6 +2482,7 @@ def main() -> None:
                 rotate_x_deg=args.rotate_x_deg,
                 spacing_gradient=effective_gradient,
                 include_center=not args.exclude_center,
+                show_displacement_vectors=args.debug_show_displacement_vectors,
                 precision=args.precision,
             )
 
